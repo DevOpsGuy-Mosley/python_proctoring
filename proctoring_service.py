@@ -297,6 +297,45 @@ def analyze_frame():
         logger.error(f"Erreur analyse frame API: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/record-violation', methods=['POST'])
+def record_violation():
+    """API pour enregistrer une violation"""
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id')
+        violation_type = data.get('type')
+        description = data.get('description')
+        timestamp = data.get('timestamp')
+        
+        if not session_id or not violation_type:
+            return jsonify({"error": "session_id et type requis"}), 400
+        
+        # Créer la violation
+        violation_data = {
+            'type': violation_type,
+            'severity': 'medium',
+            'description': description or f'Violation de type: {violation_type}',
+            'confidence': 0.9,
+            'user_action': 'system_detected'
+        }
+        
+        # Sauvegarder en base
+        success = db_manager.save_violation(session_id, violation_data)
+        
+        if success:
+            logger.info(f"Violation enregistrée: {violation_type} pour session {session_id}")
+            return jsonify({
+                "success": True,
+                "message": "Violation enregistrée",
+                "violation_type": violation_type
+            })
+        else:
+            return jsonify({"error": "Erreur sauvegarde violation"}), 500
+            
+    except Exception as e:
+        logger.error(f"Erreur record violation API: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 # Events WebSocket
 @socketio.on('connect')
 def handle_connect():
