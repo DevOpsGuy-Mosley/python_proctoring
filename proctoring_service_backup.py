@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Microservice Python pour le Proctoring IA - Version Stable
+Microservice Python pour le Proctoring IA
 Plateforme Sélect - Surveillance en temps réel
 """
 
@@ -45,30 +45,43 @@ eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml
 # Sessions actives
 active_sessions: Dict[str, Dict] = {}
 
+# Configuration audio
+AUDIO_CONFIG = {
+    'CHUNK': 1024,
+    'FORMAT': None,  # Audio désactivé
+    'CHANNELS': 1,
+    'RATE': 44100,
+    'THRESHOLD': 500,  # Seuil de détection de voix
+    'SILENCE_DURATION': 2.0  # Durée de silence avant alerte
+}
+
 # Configuration logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# VoiceDetector supprimé pour compatibilité cloud
+
 class ProctoringAnalyzer:
-    """Analyseur de proctoring avec OpenCV - Version stable"""
+    """Analyseur de proctoring avec OpenCV"""
     
     def __init__(self):
         self.face_cascade = face_cascade
         self.eye_cascade = eye_cascade
-        # Compteurs pour éviter les alertes trop fréquentes
-        self.last_no_face_alert = {}
-        self.no_face_count = {}
-        self.ALERT_COOLDOWN = 10  # 10 secondes entre les alertes
-        self.NO_FACE_THRESHOLD = 5  # 5 frames consécutives sans visage avant alerte
     
     def analyze_frame(self, frame_data: str, session_id: str = None) -> Dict[str, Any]:
         """Analyser une frame vidéo pour détecter les anomalies"""
         try:
+            logger.info(f"Début analyse frame pour session {session_id}")
+            
             # Décoder l'image base64
             if ',' in frame_data:
                 frame_data = frame_data.split(',')[1]
             
+            logger.info(f"Données frame après nettoyage: {len(frame_data)} caractères")
+            
             image_data = base64.b64decode(frame_data)
+            logger.info(f"Image décodée: {len(image_data)} bytes")
+            
             nparr = np.frombuffer(image_data, np.uint8)
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
@@ -76,17 +89,14 @@ class ProctoringAnalyzer:
                 logger.error(f"Impossible de décoder l'image pour session {session_id}")
                 return {"error": "Impossible de décoder l'image"}
             
+            logger.info(f"Frame décodée: {frame.shape}")
+            
             # Convertir en niveaux de gris
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             
-            # Détecter les visages avec paramètres plus stables
-            faces = self.face_cascade.detectMultiScale(
-                gray, 
-                scaleFactor=1.1, 
-                minNeighbors=5,  # Plus strict pour éviter les faux positifs
-                minSize=(30, 30),  # Taille minimale du visage
-                flags=cv2.CASCADE_SCALE_IMAGE
-            )
+            # Détecter les visages
+            faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
+            logger.info(f"Visages détectés: {len(faces)}")
             
             result = {
                 "faces_detected": len(faces),
@@ -97,36 +107,21 @@ class ProctoringAnalyzer:
                 "should_fail": False
             }
             
-            current_time = time.time()
-            
             # Analyser les anomalies
             if len(faces) == 0:
-                # Aucun visage détecté - gérer le compteur
-                if session_id not in self.no_face_count:
-                    self.no_face_count[session_id] = 0
-                
-                self.no_face_count[session_id] += 1
+                # Aucun visage détecté
+                result["anomalies"].append({
+                    "type": "no_face",
+                    "severity": "high",
+                    "description": "Aucun visage détecté dans la frame - Sortie de cadre détectée",
+                    "confidence": 0.9
+                })
+                result["should_warn"] = True
                 result["face_detected"] = False
-                
-                # Envoyer l'alerte seulement après plusieurs frames sans visage
-                if self.no_face_count[session_id] >= self.NO_FACE_THRESHOLD:
-                    # Vérifier le cooldown pour éviter les alertes trop fréquentes
-                    if (session_id not in self.last_no_face_alert or 
-                        current_time - self.last_no_face_alert[session_id] > self.ALERT_COOLDOWN):
-                        
-                        result["anomalies"].append({
-                            "type": "no_face",
-                            "severity": "high",
-                            "description": "Aucun visage détecté - Sortie de cadre détectée",
-                            "confidence": 0.9
-                        })
-                        result["should_warn"] = True
-                        self.last_no_face_alert[session_id] = current_time
-                        logger.warning(f"Sortie de cadre détectée pour session {session_id}")
+                logger.warning(f"Sortie de cadre détectée pour session {session_id}")
                 
             elif len(faces) > 1:
                 # Plusieurs visages détectés
-                result["face_detected"] = True
                 result["anomalies"].append({
                     "type": "multiple_faces",
                     "severity": "high",
@@ -134,49 +129,19 @@ class ProctoringAnalyzer:
                     "confidence": 0.95
                 })
                 result["should_warn"] = True
+                result["face_detected"] = True
                 logger.warning(f"Plusieurs visages détectés ({len(faces)}) pour session {session_id}")
                 
-                # Réinitialiser le compteur no_face
-                if session_id in self.no_face_count:
-                    self.no_face_count[session_id] = 0
-                    
             else:
                 # Un seul visage détecté - analyser les yeux
                 result["face_detected"] = True
-                
-                # Réinitialiser le compteur no_face
-                if session_id in self.no_face_count:
-                    self.no_face_count[session_id] = 0
-                
+                logger.info(f"Un seul visage détecté pour session {session_id}")
                 face = faces[0]
                 x, y, w, h = face
                 roi_gray = gray[y:y+h, x:x+w]
-                eyes = self.eye_cascade.detectMultiScale(roi_gray, 1.1, 3)
+                eyes = self.eye_cascade.detectMultiScale(roi_gray)
                 
-                # Vérifier la taille du visage (trop loin/trop près)
-                face_area = w * h
-                frame_area = frame.shape[0] * frame.shape[1]
-                face_ratio = face_area / frame_area
-                
-                # Seuils plus réalistes - ajustés pour éviter les faux positifs
-                if face_ratio < 0.015:  # Visage vraiment très petit (1.5% de la frame)
-                    result["anomalies"].append({
-                        "type": "face_too_small",
-                        "severity": "medium",
-                        "description": "Visage trop petit (trop loin de la caméra)",
-                        "confidence": 0.6
-                    })
-                    result["should_warn"] = True
-                elif face_ratio > 0.5:  # Visage vraiment très grand (50% de la frame)
-                    result["anomalies"].append({
-                        "type": "face_too_large",
-                        "severity": "low",
-                        "description": "Visage trop grand (trop près de la caméra)",
-                        "confidence": 0.5
-                    })
-                
-                # Détection de regard détourné plus stricte
-                if len(eyes) < 2 and face_ratio > 0.08:  # Seulement si le visage est assez grand (8% de la frame)
+                if len(eyes) < 2:
                     result["anomalies"].append({
                         "type": "looking_away",
                         "severity": "medium",
@@ -184,12 +149,47 @@ class ProctoringAnalyzer:
                         "confidence": 0.7
                     })
                     result["should_warn"] = True
+                    logger.warning(f"Regard détourné détecté pour session {session_id}")
+                
+                # Vérifier la taille du visage (trop loin/trop près)
+                face_area = w * h
+                frame_area = frame.shape[0] * frame.shape[1]
+                face_ratio = face_area / frame_area
+                
+                if face_ratio < 0.05:
+                    result["anomalies"].append({
+                        "type": "face_too_small",
+                        "severity": "medium",
+                        "description": "Visage trop petit (trop loin de la caméra)",
+                        "confidence": 0.6
+                    })
+                elif face_ratio > 0.3:
+                    result["anomalies"].append({
+                        "type": "face_too_large",
+                        "severity": "low",
+                        "description": "Visage trop grand (trop près de la caméra)",
+                        "confidence": 0.5
+                    })
             
+            # Le nouveau système de surveillance 5/5 est géré côté frontend
+            
+            logger.info(f"Résultat analyse pour session {session_id}: visage={result.get('face_detected', False)}, anomalies={len(result.get('anomalies', []))}")
             return result
             
         except Exception as e:
             logger.error(f"Erreur analyse frame: {str(e)}")
             return {"error": f"Erreur d'analyse: {str(e)}"}
+    
+    def detect_audio_anomaly(self, audio_level: float) -> Dict[str, Any]:
+        """Détecter les anomalies audio (simulation)"""
+        if audio_level > 0.8:
+            return {
+                "type": "audio_anomaly",
+                "severity": "medium",
+                "description": "Niveau audio élevé détecté",
+                "confidence": 0.7
+            }
+        return None
 
 class DatabaseManager:
     """Gestionnaire de base de données MySQL"""
@@ -217,6 +217,7 @@ class DatabaseManager:
     def save_proctoring_alert(self, session_id: str, alert_data: Dict) -> bool:
         """Sauvegarder une alerte de proctoring"""
         if not self.db_available:
+            logger.warning("Base de données non disponible - alerte non sauvegardée")
             return False
             
         try:
@@ -253,6 +254,7 @@ class DatabaseManager:
     def save_violation(self, session_id: str, violation_data: Dict) -> bool:
         """Sauvegarder une violation"""
         if not self.db_available:
+            logger.warning("Base de données non disponible - violation non sauvegardée")
             return False
             
         try:
@@ -297,7 +299,7 @@ def root():
     return jsonify({
         "service": "select_proctoring",
         "status": "running",
-        "version": "1.0.1",
+        "version": "1.0.0",
         "timestamp": datetime.now().isoformat()
     })
 
@@ -323,7 +325,7 @@ def analyze_frame():
             return jsonify({"error": "session_id et frame requis"}), 400
         
         # Analyser la frame
-        result = analyzer.analyze_frame(frame_data, session_id)
+        result = analyzer.analyze_frame(frame_data)
         
         # Sauvegarder les alertes
         if result.get('anomalies'):
@@ -351,11 +353,6 @@ def handle_disconnect():
     for session_id, session_data in list(active_sessions.items()):
         if session_data.get('socket_id') == request.sid:
             del active_sessions[session_id]
-            # Nettoyer les compteurs
-            if session_id in analyzer.no_face_count:
-                del analyzer.no_face_count[session_id]
-            if session_id in analyzer.last_no_face_alert:
-                del analyzer.last_no_face_alert[session_id]
 
 @socketio.on('join_test_session')
 def handle_join_session(data):
@@ -369,18 +366,18 @@ def handle_join_session(data):
             'anomaly_count': 0,
             'violation_count': 0,
             'warning_count': 0,
+            'voice_detected': False,
             'test_failed': False
         }
         
-        # Initialiser les compteurs pour cette session
-        analyzer.no_face_count[session_id] = 0
+        # La détection de voix est désactivée pour compatibilité cloud
         
         join_room(session_id)
         emit('session_joined', {
             'status': 'success', 
             'session_id': session_id,
             'warning_system': {
-                'max_warnings': 5,  # Système 5/5
+                'max_warnings': 3,
                 'current_warnings': 0
             }
         })
@@ -393,49 +390,63 @@ def handle_video_frame(data):
     frame_data = data.get('frame')
     
     if not session_id:
+        logger.warning("Frame reçue sans session_id")
         return
         
     if session_id not in active_sessions:
+        logger.warning(f"Frame reçue pour session inexistante: {session_id}")
         return
     
     # Vérifier si le test a déjà échoué
     if active_sessions[session_id].get('test_failed', False):
         return
     
+    logger.info(f"Frame reçue pour session {session_id}, taille: {len(frame_data) if frame_data else 0}")
+    
     try:
         # Analyser la frame
         analysis = analyzer.analyze_frame(frame_data, session_id)
+        logger.info(f"Analyse terminée pour session {session_id}: {analysis}")
         
-        # Toujours envoyer un signal si un visage est détecté (pour arrêter le décompte)
+        # Toujours envoyer un signal de visage détecté si un visage est trouvé
         if analysis.get('face_detected'):
             emit('face_detected', {
                 'timestamp': datetime.now().isoformat(),
                 'session_id': session_id,
                 'faces_count': analysis.get('faces_detected', 0)
             }, room=session_id)
+            logger.info(f"Visage détecté pour session {session_id}")
         
-        # Envoyer les alertes seulement s'il y en a
-        if analysis.get('anomalies') and analysis.get('should_warn'):
+        if analysis.get('anomalies'):
             active_sessions[session_id]['anomaly_count'] += len(analysis['anomalies'])
             
-            # Sauvegarder les alertes (optionnel)
-            for anomaly in analysis['anomalies']:
-                db_manager.save_proctoring_alert(session_id, anomaly)
+            # Sauvegarder les alertes (optionnel - peut échouer sans affecter le fonctionnement)
+            try:
+                for anomaly in analysis['anomalies']:
+                    db_manager.save_proctoring_alert(session_id, anomaly)
+            except Exception as e:
+                logger.warning(f"Erreur sauvegarde alerte: {str(e)}")
             
-            # Envoyer l'alerte pour chaque anomalie
-            for anomaly in analysis['anomalies']:
-                emit('proctoring_alert', {
-                    'type': anomaly['type'],
-                    'severity': anomaly['severity'],
-                    'description': anomaly['description'],
-                    'confidence': anomaly['confidence'],
-                    'timestamp': datetime.now().isoformat()
-                }, room=session_id)
-            
-            logger.info(f"Alerte envoyée pour session {session_id}: {anomaly['type']}")
+            # Gérer les alertes immédiatement (système de surveillance 5/5)
+            if analysis.get('should_warn'):
+                # Envoyer l'alerte immédiatement pour chaque anomalie
+                for anomaly in analysis['anomalies']:
+                    emit('proctoring_alert', {
+                        'type': anomaly['type'],
+                        'severity': anomaly['severity'],
+                        'description': anomaly['description'],
+                        'confidence': anomaly['confidence'],
+                        'timestamp': datetime.now().isoformat()
+                    }, room=session_id)
+                
+                logger.info(f"Alerte envoyée pour session {session_id}: {len(analysis['anomalies'])} anomalies")
+        
+        # Le système d'échec est maintenant géré côté frontend (surveillance 5/5)
+        logger.info(f"Analyse proctoring pour session {session_id}: {len(analysis.get('anomalies', []))} anomalies, visage: {analysis.get('face_detected', False)}")
         
     except Exception as e:
         logger.error(f"Erreur analyse frame pour session {session_id}: {str(e)}")
+        # En cas d'erreur, on continue sans envoyer d'alerte
 
 @socketio.on('test_violation')
 def handle_test_violation(data):
@@ -466,6 +477,73 @@ def handle_test_violation(data):
         
         logger.info(f"Violation enregistrée pour session {session_id}: {violation_type}")
 
+@socketio.on('audio_anomaly')
+def handle_audio_anomaly(data):
+    """Traiter une anomalie audio"""
+    session_id = data.get('session_id')
+    audio_level = data.get('audio_level', 0.0)
+    
+    if session_id and session_id in active_sessions:
+        # Vérifier si le test a déjà échoué
+        if active_sessions[session_id].get('test_failed', False):
+            return
+            
+        anomaly = analyzer.detect_audio_anomaly(audio_level)
+        
+        if anomaly:
+            # Marquer la voix comme détectée
+            active_sessions[session_id]['voice_detected'] = True
+            
+            # Ajouter un avertissement pour la voix
+            active_sessions[session_id]['warning_count'] += 1
+            warning_count = active_sessions[session_id]['warning_count']
+            
+            # Sauvegarder l'alerte
+            db_manager.save_proctoring_alert(session_id, anomaly)
+            
+            # Vérifier si on atteint 3 avertissements
+            if warning_count >= 3:
+                active_sessions[session_id]['test_failed'] = True
+                
+                # Marquer le test comme échoué dans la base de données
+                try:
+                    conn = db_manager.get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE test_sessions SET status = 'failed', end_time = NOW() WHERE id = %s",
+                        (session_id,)
+                    )
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                except Exception as e:
+                    logger.error(f"Erreur mise à jour statut test: {str(e)}")
+                
+                emit('test_failed', {
+                    'reason': 'Trop d\'avertissements - Voix détectée',
+                    'warning_count': warning_count,
+                    'timestamp': datetime.now().isoformat()
+                }, room=session_id)
+                
+                logger.info(f"Test échoué automatiquement pour session {session_id} - Voix détectée (3 avertissements)")
+            else:
+                emit('proctoring_warning', {
+                    'anomalies': [anomaly],
+                    'warning_count': warning_count,
+                    'max_warnings': 3,
+                    'remaining_warnings': 3 - warning_count,
+                    'timestamp': datetime.now().isoformat()
+                }, room=session_id)
+                
+                logger.info(f"Avertissement {warning_count}/3 pour session {session_id} - Voix détectée")
+            
+            emit('proctoring_alert', {
+                'anomalies': [anomaly],
+                'warning_count': warning_count,
+                'test_failed': active_sessions[session_id]['test_failed'],
+                'timestamp': datetime.now().isoformat()
+            }, room=session_id)
+
 @socketio.on('session_end')
 def handle_session_end(data):
     """Fin de session"""
@@ -492,16 +570,10 @@ def handle_session_end(data):
         del active_sessions[session_id]
         leave_room(session_id)
         
-        # Nettoyer les compteurs
-        if session_id in analyzer.no_face_count:
-            del analyzer.no_face_count[session_id]
-        if session_id in analyzer.last_no_face_alert:
-            del analyzer.last_no_face_alert[session_id]
-        
         logger.info(f"Session {session_id} terminée - Anomalies: {total_anomalies}, Violations: {total_violations}")
 
 if __name__ == '__main__':
-    logger.info("Démarrage du service de proctoring IA - Version Stable")
+    logger.info("Démarrage du service de proctoring IA")
     logger.info(f"Configuration DB: {DB_CONFIG['host']}:{DB_CONFIG['database']}")
     
     # Démarrer le serveur

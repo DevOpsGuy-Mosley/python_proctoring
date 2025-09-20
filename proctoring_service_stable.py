@@ -158,8 +158,8 @@ class ProctoringAnalyzer:
                 frame_area = frame.shape[0] * frame.shape[1]
                 face_ratio = face_area / frame_area
                 
-                # Seuils plus réalistes - ajustés pour éviter les faux positifs
-                if face_ratio < 0.015:  # Visage vraiment très petit (1.5% de la frame)
+                # Seuils plus réalistes
+                if face_ratio < 0.03:  # Visage vraiment très petit
                     result["anomalies"].append({
                         "type": "face_too_small",
                         "severity": "medium",
@@ -167,7 +167,7 @@ class ProctoringAnalyzer:
                         "confidence": 0.6
                     })
                     result["should_warn"] = True
-                elif face_ratio > 0.5:  # Visage vraiment très grand (50% de la frame)
+                elif face_ratio > 0.4:  # Visage vraiment très grand
                     result["anomalies"].append({
                         "type": "face_too_large",
                         "severity": "low",
@@ -176,7 +176,7 @@ class ProctoringAnalyzer:
                     })
                 
                 # Détection de regard détourné plus stricte
-                if len(eyes) < 2 and face_ratio > 0.08:  # Seulement si le visage est assez grand (8% de la frame)
+                if len(eyes) < 2 and face_ratio > 0.05:  # Seulement si le visage n'est pas trop petit
                     result["anomalies"].append({
                         "type": "looking_away",
                         "severity": "medium",
