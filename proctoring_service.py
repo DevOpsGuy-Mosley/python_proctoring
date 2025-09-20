@@ -16,8 +16,6 @@ import logging
 import os
 from typing import Dict, List, Any
 import uuid
-import pyaudio
-import wave
 import threading
 import time
 
@@ -50,7 +48,7 @@ active_sessions: Dict[str, Dict] = {}
 # Configuration audio
 AUDIO_CONFIG = {
     'CHUNK': 1024,
-    'FORMAT': pyaudio.paInt16,
+    'FORMAT': None,  # Audio désactivé
     'CHANNELS': 1,
     'RATE': 44100,
     'THRESHOLD': 500,  # Seuil de détection de voix
@@ -61,68 +59,7 @@ AUDIO_CONFIG = {
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class VoiceDetector:
-    """Détecteur de voix en temps réel"""
-    
-    def __init__(self):
-        self.audio = pyaudio.PyAudio()
-        self.is_listening = False
-        self.voice_detected = False
-        self.silence_start = None
-        
-    def start_listening(self, session_id: str):
-        """Démarrer l'écoute audio pour une session"""
-        def audio_worker():
-            try:
-                stream = self.audio.open(
-                    format=AUDIO_CONFIG['FORMAT'],
-                    channels=AUDIO_CONFIG['CHANNELS'],
-                    rate=AUDIO_CONFIG['RATE'],
-                    input=True,
-                    frames_per_buffer=AUDIO_CONFIG['CHUNK']
-                )
-                
-                self.is_listening = True
-                logger.info(f"Démarrage écoute audio pour session {session_id}")
-                
-                while self.is_listening:
-                    data = stream.read(AUDIO_CONFIG['CHUNK'])
-                    audio_level = np.frombuffer(data, dtype=np.int16).max()
-                    
-                    if audio_level > AUDIO_CONFIG['THRESHOLD']:
-                        if not self.voice_detected:
-                            self.voice_detected = True
-                            self.silence_start = None
-                            logger.info(f"Voix détectée dans session {session_id}")
-                            
-                            # Envoyer alerte de voix
-                            socketio.emit('voice_detected', {
-                                'session_id': session_id,
-                                'audio_level': audio_level,
-                                'timestamp': datetime.now().isoformat()
-                            }, room=session_id)
-                    else:
-                        if self.voice_detected:
-                            if self.silence_start is None:
-                                self.silence_start = time.time()
-                            elif time.time() - self.silence_start > AUDIO_CONFIG['SILENCE_DURATION']:
-                                self.voice_detected = False
-                                self.silence_start = None
-                                logger.info(f"Silence détecté dans session {session_id}")
-                
-                stream.stop_stream()
-                stream.close()
-                
-            except Exception as e:
-                logger.error(f"Erreur écoute audio: {str(e)}")
-        
-        thread = threading.Thread(target=audio_worker)
-        thread.daemon = True
-        thread.start()
-    
-    def stop_listening(self):
-        """Arrêter l'écoute audio"""
-        self.is_listening = False
+# VoiceDetector supprimé pour compatibilité cloud
 
 class ProctoringAnalyzer:
     """Analyseur de proctoring avec OpenCV"""
@@ -130,7 +67,6 @@ class ProctoringAnalyzer:
     def __init__(self):
         self.face_cascade = face_cascade
         self.eye_cascade = eye_cascade
-        self.voice_detector = VoiceDetector()
     
     def analyze_frame(self, frame_data: str, session_id: str = None) -> Dict[str, Any]:
         """Analyser une frame vidéo pour détecter les anomalies"""
