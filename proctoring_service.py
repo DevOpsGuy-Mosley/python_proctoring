@@ -200,12 +200,14 @@ class DatabaseManager:
         
         # Tester la connexion au démarrage
         try:
+            logger.info(f"Tentative de connexion DB avec config: host={self.config['host']}, user={self.config['user']}, database={self.config['database']}")
             conn = mysql.connector.connect(**self.config)
             conn.close()
             self.db_available = True
             logger.info("Connexion à la base de données OK")
         except Exception as e:
             logger.warning(f"Base de données non disponible: {str(e)}")
+            logger.warning(f"Config utilisée: {self.config}")
             self.db_available = False
     
     def get_connection(self):
