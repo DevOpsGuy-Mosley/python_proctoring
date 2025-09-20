@@ -186,13 +186,30 @@ class DatabaseManager:
     
     def __init__(self):
         self.config = DB_CONFIG
+        self.db_available = False
+        
+        # Tester la connexion au démarrage
+        try:
+            conn = mysql.connector.connect(**self.config)
+            conn.close()
+            self.db_available = True
+            logger.info("Connexion à la base de données OK")
+        except Exception as e:
+            logger.warning(f"Base de données non disponible: {str(e)}")
+            self.db_available = False
     
     def get_connection(self):
         """Obtenir une connexion à la base de données"""
+        if not self.db_available:
+            raise Exception("Base de données non disponible")
         return mysql.connector.connect(**self.config)
     
     def save_proctoring_alert(self, session_id: str, alert_data: Dict) -> bool:
         """Sauvegarder une alerte de proctoring"""
+        if not self.db_available:
+            logger.warning("Base de données non disponible - alerte non sauvegardée")
+            return False
+            
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -226,6 +243,10 @@ class DatabaseManager:
     
     def save_violation(self, session_id: str, violation_data: Dict) -> bool:
         """Sauvegarder une violation"""
+        if not self.db_available:
+            logger.warning("Base de données non disponible - violation non sauvegardée")
+            return False
+            
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -262,6 +283,16 @@ analyzer = ProctoringAnalyzer()
 db_manager = DatabaseManager()
 
 # Routes API
+@app.route('/', methods=['GET'])
+def root():
+    """Route racine pour éviter les erreurs 404"""
+    return jsonify({
+        "service": "select_proctoring",
+        "status": "running",
+        "version": "1.0.0",
+        "timestamp": datetime.now().isoformat()
+    })
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Vérification de santé du service"""
@@ -297,45 +328,6 @@ def analyze_frame():
         logger.error(f"Erreur analyse frame API: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/record-violation', methods=['POST'])
-def record_violation():
-    """API pour enregistrer une violation"""
-    try:
-        data = request.get_json()
-        session_id = data.get('session_id')
-        violation_type = data.get('type')
-        description = data.get('description')
-        timestamp = data.get('timestamp')
-        
-        if not session_id or not violation_type:
-            return jsonify({"error": "session_id et type requis"}), 400
-        
-        # Créer la violation
-        violation_data = {
-            'type': violation_type,
-            'severity': 'medium',
-            'description': description or f'Violation de type: {violation_type}',
-            'confidence': 0.9,
-            'user_action': 'system_detected'
-        }
-        
-        # Sauvegarder en base
-        success = db_manager.save_violation(session_id, violation_data)
-        
-        if success:
-            logger.info(f"Violation enregistrée: {violation_type} pour session {session_id}")
-            return jsonify({
-                "success": True,
-                "message": "Violation enregistrée",
-                "violation_type": violation_type
-            })
-        else:
-            return jsonify({"error": "Erreur sauvegarde violation"}), 500
-            
-    except Exception as e:
-        logger.error(f"Erreur record violation API: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
 # Events WebSocket
 @socketio.on('connect')
 def handle_connect():
@@ -368,8 +360,7 @@ def handle_join_session(data):
             'test_failed': False
         }
         
-        # Démarrer la détection de voix
-        analyzer.voice_detector.start_listening(session_id)
+        # La détection de voix est désactivée pour compatibilité cloud
         
         join_room(session_id)
         emit('session_joined', {
@@ -402,40 +393,49 @@ def handle_video_frame(data):
     
     logger.info(f"Frame reçue pour session {session_id}, taille: {len(frame_data) if frame_data else 0}")
     
-    # Analyser la frame
-    analysis = analyzer.analyze_frame(frame_data, session_id)
-    
-    if analysis.get('anomalies'):
-        active_sessions[session_id]['anomaly_count'] += len(analysis['anomalies'])
+    try:
+        # Analyser la frame
+        analysis = analyzer.analyze_frame(frame_data, session_id)
         
-        # Sauvegarder les alertes
-        for anomaly in analysis['anomalies']:
-            db_manager.save_proctoring_alert(session_id, anomaly)
-        
-        # Gérer les alertes immédiatement (système de surveillance 5/5)
-        if analysis.get('should_warn'):
-            # Envoyer l'alerte immédiatement pour chaque anomalie
-            for anomaly in analysis['anomalies']:
-                emit('proctoring_alert', {
-                    'type': anomaly['type'],
-                    'severity': anomaly['severity'],
-                    'description': anomaly['description'],
-                    'confidence': anomaly['confidence'],
-                    'timestamp': datetime.now().isoformat()
-                }, room=session_id)
-            
-            logger.info(f"Alerte envoyée pour session {session_id}: {len(analysis['anomalies'])} anomalies")
-        
-        # Envoyer un signal si un visage est détecté (pour arrêter le décompte)
+        # Toujours envoyer un signal de visage détecté si un visage est trouvé
         if analysis.get('face_detected'):
             emit('face_detected', {
                 'timestamp': datetime.now().isoformat(),
-                'session_id': session_id
+                'session_id': session_id,
+                'faces_count': analysis.get('faces_detected', 0)
             }, room=session_id)
+            logger.info(f"Visage détecté pour session {session_id}")
+        
+        if analysis.get('anomalies'):
+            active_sessions[session_id]['anomaly_count'] += len(analysis['anomalies'])
+            
+            # Sauvegarder les alertes (optionnel - peut échouer sans affecter le fonctionnement)
+            try:
+                for anomaly in analysis['anomalies']:
+                    db_manager.save_proctoring_alert(session_id, anomaly)
+            except Exception as e:
+                logger.warning(f"Erreur sauvegarde alerte: {str(e)}")
+            
+            # Gérer les alertes immédiatement (système de surveillance 5/5)
+            if analysis.get('should_warn'):
+                # Envoyer l'alerte immédiatement pour chaque anomalie
+                for anomaly in analysis['anomalies']:
+                    emit('proctoring_alert', {
+                        'type': anomaly['type'],
+                        'severity': anomaly['severity'],
+                        'description': anomaly['description'],
+                        'confidence': anomaly['confidence'],
+                        'timestamp': datetime.now().isoformat()
+                    }, room=session_id)
+                
+                logger.info(f"Alerte envoyée pour session {session_id}: {len(analysis['anomalies'])} anomalies")
         
         # Le système d'échec est maintenant géré côté frontend (surveillance 5/5)
+        logger.info(f"Analyse proctoring pour session {session_id}: {len(analysis.get('anomalies', []))} anomalies, visage: {analysis.get('face_detected', False)}")
         
-        logger.info(f"Analyse proctoring pour session {session_id}: {len(analysis['anomalies'])} anomalies")
+    except Exception as e:
+        logger.error(f"Erreur analyse frame pour session {session_id}: {str(e)}")
+        # En cas d'erreur, on continue sans envoyer d'alerte
 
 @socketio.on('test_violation')
 def handle_test_violation(data):
@@ -564,14 +564,6 @@ def handle_session_end(data):
 if __name__ == '__main__':
     logger.info("Démarrage du service de proctoring IA")
     logger.info(f"Configuration DB: {DB_CONFIG['host']}:{DB_CONFIG['database']}")
-    
-    # Vérifier la connexion à la base de données
-    try:
-        conn = db_manager.get_connection()
-        conn.close()
-        logger.info("Connexion à la base de données OK")
-    except Exception as e:
-        logger.error(f"Erreur connexion DB: {str(e)}")
     
     # Démarrer le serveur
     socketio.run(app, host='0.0.0.0', port=8001, debug=True)
